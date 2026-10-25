@@ -1,0 +1,10 @@
+# the real training pod (GPU): the pod server + RF-DETR training. Installed by deploy.sh into a venv that sees the
+# pod image's CUDA torch (--system-site-packages), so torch / torchvision are not reinstalled (rfdetr needs >= 2.2).
+fastapi==0.161.1
+uvicorn==0.54.0
+pydantic==2.14.1
+httpx==0.28.1
+websockets==17.3
+rfdetr[train]==1.11.2   # the same version as the gateway's, so the gateway can load the trained checkpoint
+huggingface_hub
+opencv-python-headless   # the labeller decodes the frames the gateway sends
