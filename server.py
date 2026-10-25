@@ -17,7 +17,7 @@ The tunnel is opened by whichever side reaches the other first:
 
 Settings (environment or .env.example): TUNNEL_KEY, TRAINER_KEY, HF_TOKEN (the trainer's, read-only), POD_ID
 (optional; RUNPOD_POD_ID on RunPod). A command started over SSH doesn't get the pod's RunPod environment, so these
-are also read from the container's start environment. The services bind 127.0.0.1; only the agent calls them.
+are also read from the container's start environment, then from .env next to this file (install.sh writes it). The services bind 127.0.0.1; only the agent calls them.
 """
 
 import argparse
@@ -44,16 +44,24 @@ MODULES = {"detector": "services.detector", "vllm": "services.vlm", "trainer": "
 POD_ENV = ("TUNNEL_KEY", "TRAINER_KEY", "HF_TOKEN", "RUNPOD_POD_ID")
 
 
+ENV_FILE = Path(__file__).resolve().parent / ".env"  # written by install.sh (mode 600), the keys it was given
+
+
 def pod_environment():
-    """On RunPod, the pod's env vars (and secrets) are in the container's start environment (process 1), which a
-    command started over SSH doesn't inherit. Copy the ones this server uses into os.environ if they are missing."""
+    """The keys this server uses, first found wins: its own environment; the container's start environment (process 1:
+    the RunPod console's env vars, which a command started over SSH doesn't inherit); then .env from install.sh."""
+    found = []
     try:
-        raw = Path("/proc/1/environ").read_bytes()
+        found += Path("/proc/1/environ").read_bytes().decode(errors="replace").split("\0")
     except OSError:
-        return
-    for item in raw.split(b"\0"):
-        k, _, v = item.decode(errors="replace").partition("=")
-        if k in POD_ENV and not os.environ.get(k):
+        pass
+    try:
+        found += ENV_FILE.read_text().splitlines()
+    except OSError:
+        pass
+    for item in found:
+        k, _, v = item.partition("=")
+        if k in POD_ENV and v and not os.environ.get(k):
             os.environ[k] = v
 
 

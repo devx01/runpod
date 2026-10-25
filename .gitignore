@@ -5,3 +5,5 @@ __pycache__/
 # logs of a local run (the pod writes its own)
 *.log
 pod.pid
+# the gateway detector, copied in by the installer and deploy.sh
+shared/
