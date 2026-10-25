@@ -17,7 +17,7 @@ read -r -a SSH_ARGS <<< "$DEST"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 "${SSH_ARGS[@]}" "$@")
 
 echo "→ copying runpod/ to ~/runpod on the pod"
-COPYFILE_DISABLE=1 tar -C "$HERE" --no-xattrs --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
+COPYFILE_DISABLE=1 tar -C "$HERE" --no-xattrs --exclude .git --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
     --exclude tests -czf - . \
   | "${SSH[@]}" 'mkdir -p ~/runpod && tar -C ~/runpod -xzf -'
 

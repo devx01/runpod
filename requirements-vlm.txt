@@ -1,3 +1,3 @@
 # The pod's VLM (services/vlm.py starts it on demand): vLLM in its own venv (~/vllm-venv), because it pins its
 # own torch, which differs from rfdetr's. Qwen3.5 needs a recent vLLM; deploy.sh VLM=1 installs it and prints the version.
-vllm>=0.17.0
+vllm==0.32.0  # the version checked on an RTX PRO 4000 Blackwell (24 GB) with Qwen3.5-9B

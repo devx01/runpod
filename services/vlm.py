@@ -38,8 +38,11 @@ HERE = Path(__file__).resolve().parent.parent
 MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3.5-9B")
 IDLE_S = float(os.environ.get("VLLM_IDLE_S", "600"))
 LOG = Path(os.environ.get("VLLM_LOG", HERE / "vllm.log"))
-# bf16 Qwen3.5-9B on a 24 GB card: ~19 GB of weights, the rest for the KV cache; one image per request
-FLAGS = ["--max-model-len", "8192", "--limit-mm-per-prompt", '{"image": 1}', "--gpu-memory-utilization", "0.92"]
+# bf16 Qwen3.5-9B on a 24 GB card: ~18 GB of weights, the rest for the KV cache; one image per request, a few requests
+# at a time (the gateway sends one frame at a time; vLLM's default of 256 runs out of memory capturing CUDA graphs).
+# --enforce-eager: no torch.compile / CUDA graph capture, so it is ready in ~70 s instead of ~250 s (it starts per run)
+FLAGS = ["--max-model-len", "8192", "--limit-mm-per-prompt", '{"image": 1}', "--gpu-memory-utilization", "0.88",
+         "--max-num-seqs", "4", "--enforce-eager"]
 _lock = threading.Lock()
 _s = {"proc": None, "port": None, "used": 0.0, "why": None}  # why: the last stop's reason / exit
 
