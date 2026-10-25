@@ -104,6 +104,41 @@ def ensure_valid(root, log):
     return True
 
 
+def cover_valid(root, log):
+    """A class with training boxes but none in valid is never scored, nor counted when the best checkpoint is picked:
+    move every 5th training image with it (at least one) to valid. Returns the classes it did that for."""
+    root = Path(root)
+    train, valid = load_coco(root / "train"), load_coco(root / "valid")
+    names = {c["id"]: c["name"] for c in train["categories"]}
+    in_valid = {a["category_id"] for a in valid["annotations"]}
+    held, covered = set(), []
+    for cid in sorted({a["category_id"] for a in train["annotations"]} - in_valid):
+        with_it = sorted({a["image_id"] for a in train["annotations"] if a["category_id"] == cid} - held)
+        if len(with_it) < 2:
+            continue  # its only image stays for training
+        held |= {i for k, i in enumerate(with_it) if k % VALID_SHARE == VALID_SHARE - 1} or {with_it[-1]}
+        covered.append(names.get(cid, str(cid)))
+    if not held:
+        return []
+    for img in train["images"]:
+        if img["id"] in held:
+            shutil.move(str(root / "train" / img["file_name"]), str(root / "valid" / img["file_name"]))
+    # image and annotation ids are per file: renumber the moved ones past valid's own
+    img_base = max((i["id"] for i in valid["images"]), default=-1) + 1
+    ann_base = max((a["id"] for a in valid["annotations"]), default=-1) + 1
+    new_id = {i: img_base + k for k, i in enumerate(sorted(held))}
+    moved = [a for a in train["annotations"] if a["image_id"] in held]
+    valid["images"] += [{**i, "id": new_id[i["id"]]} for i in train["images"] if i["id"] in held]
+    valid["annotations"] += [{**a, "id": ann_base + k, "image_id": new_id[a["image_id"]]} for k, a in enumerate(moved)]
+    train["images"] = [i for i in train["images"] if i["id"] not in held]
+    train["annotations"] = [a for a in train["annotations"] if a["image_id"] not in held]
+    for side, d in (("train", train), ("valid", valid)):
+        (root / side / "_annotations.coco.json").write_text(json.dumps(d))
+    log(f"no {', '.join(covered)} in the valid split: {len(held)} training images with it held back for validation "
+        f"(its scores are optimistic: these frames are close to the training ones)")
+    return covered
+
+
 # ---- metrics ------------------------------------------------------------------------------------------------------
 def iou(a, b):
     ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
@@ -219,7 +254,8 @@ def run(job):
     if cfg.get("classes") and list(cfg["classes"]) != classes:
         job.log(f"note: the dataset's classes {classes} differ from the job's {cfg['classes']}: using the dataset's")
     held_back = ensure_valid(root, job.log)
-    n = {s: len(load_coco(root / s)["images"]) for s in ("train", "valid")}
+    covered = [] if held_back else cover_valid(root, job.log)
+    n ={s: len(load_coco(root / s)["images"]) for s in ("train", "valid")}
     job.log(f"dataset: {n['train']} train · {n['valid']} valid images · {len(classes)} classes: {', '.join(classes)}")
 
     job.set(stage="training", progress=0.1, epoch=0)
@@ -250,7 +286,9 @@ def run(job):
     result = {"weights": str(weights), "sha256": sha256_of(weights), "bytes": weights.stat().st_size,
               "args": {"model": cfg["model"], "epochs": cfg["epochs"], "dataset": cfg["dataset"], "classes": classes,
                        "resolution": None, "job_id": cfg["id"]},
-              "metrics": {"split": "valid (held back from train)" if held_back else "valid", "classes": scores}}
+              "metrics": {"split": "valid (held back from train)" if held_back else
+                          f"valid (+ held back from train for {', '.join(covered)})" if covered else "valid",
+                          "classes": scores}}
     (job.root / "result.json").write_text(json.dumps(result))
     job.log(f"{cfg['id']} done → {cfg['result_model']}")
     job.set(status="done", stage="done", progress=1.0)

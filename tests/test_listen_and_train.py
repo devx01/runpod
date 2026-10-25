@@ -108,6 +108,33 @@ def test_a_dataset_without_valid_gets_one_from_train(tmp_path):
     assert train_job.ensure_valid(tmp_path, lines.append) is False  # it has one now
 
 
+def test_a_class_missing_from_valid_gets_valid_images(tmp_path):
+    for side in ("train", "valid"):
+        (tmp_path / side).mkdir()
+    for i in range(10):
+        (tmp_path / "train" / f"f{i:03d}.jpg").write_bytes(b"jpg")
+    (tmp_path / "valid" / "f000.jpg").write_bytes(b"valid jpg")
+    classes = ("truck", "dozer", "stockpile", "fire")
+    # truck everywhere, stockpile in 6 training images only, dozer in one; valid has a truck only
+    train = coco(10, [(i, 0) for i in range(10)] + [(i, 2) for i in range(4, 10)] + [(3, 1)], classes)
+    valid = coco(1, [(0, 0)], classes)
+    valid["images"][0]["file_name"] = "v000.jpg"
+    (tmp_path / "valid" / "f000.jpg").rename(tmp_path / "valid" / "v000.jpg")
+    (tmp_path / "train" / "_annotations.coco.json").write_text(json.dumps(train))
+    (tmp_path / "valid" / "_annotations.coco.json").write_text(json.dumps(valid))
+    lines = []
+    assert train_job.cover_valid(tmp_path, lines.append) == ["stockpile"]  # one dozer image stays for training
+    train, valid = (train_job.load_coco(tmp_path / s) for s in ("train", "valid"))
+    assert sorted(i["file_name"] for i in valid["images"]) == ["f008.jpg", "v000.jpg"]
+    assert sorted(p.name for p in (tmp_path / "valid").glob("*.jpg")) == ["f008.jpg", "v000.jpg"]
+    assert len(train["images"]) == 9 and not any(a["image_id"] == 8 for a in train["annotations"])
+    ids = {i["id"] for i in valid["images"]}
+    assert len(ids) == 2 and {a["image_id"] for a in valid["annotations"]} == ids
+    assert len({a["id"] for a in valid["annotations"]}) == len(valid["annotations"]) == 3  # truck, truck, stockpile
+    assert "stockpile" in lines[0] and "held back" in lines[0]
+    assert train_job.cover_valid(tmp_path, lines.append) == []  # covered now
+
+
 def test_per_class_scores():
     truth = [("helmet", [0, 0, 10, 10]), ("helmet", [50, 50, 60, 60]), ("dozer", [0, 0, 40, 40])]
     pred = [("helmet", 0.9, [1, 1, 10, 10]), ("helmet", 0.8, [80, 80, 90, 90]), ("helmet", 0.2, [50, 50, 60, 60]),
