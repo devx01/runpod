@@ -61,10 +61,17 @@ def scores(classes, seed):
     return out
 
 
-def vlm_answer(text):
+def vlm_answer(text, images=0):
     """The pre-label prompt asks for "boxes": one box for each of the first two classes it lists (FAKE_VLM_EXTRA_CLASS=
     <name> adds one box of a class outside the label list, to try the automatic label registration); anything else
-    gets an alert judgement. Like Qwen3.5, it answers on a 0-1000 grid when the prompt asks for one ("Frame size WxH")."""
+    gets an alert judgement. Like Qwen3.5, it answers on a 0-1000 grid when the prompt asks for one ("Frame size WxH").
+    An inference rule hit ("safety verdict") is confirmed, unless the prompt says "[fake:reject]"; it says how many
+    images it got."""
+    if "safety verdict" in text.lower():
+        alert = "[fake:reject]" not in text
+        return json.dumps({"alert": alert, "severity": "high" if alert else "low",
+                           "reasoning": "synthetic: the clip shows the rule's situation" if alert else "synthetic: no danger",
+                           "observed": [f"{images} images"]}, separators=(",", ":"))
     if "boxes" in text.lower():
         boxes = [{"class": c, "xyxy": b["xyxy"]} for c, b in zip(prompt_classes(text)[:2], BOXES)]
         if os.environ.get("FAKE_VLM_EXTRA_CLASS"):

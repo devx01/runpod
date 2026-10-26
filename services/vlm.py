@@ -1,8 +1,10 @@
 """The pod's VLM (service name "vllm"): vLLM with Qwen3.5-9B, started on demand, because it takes most of the GPU's
 memory and the pod also trains. Key: Bearer TRAINER_KEY (the same pod as the trainer).
 
-  POST /v1/vlm/start            start vLLM (refused while a training job runs); answers at once with the status
-  GET  /v1/vlm/status           {state: stopped | starting | ready | failed, detail, engine, model}
+  POST /v1/vlm/start            start vLLM (refused while a training job runs); answers at once with the status.
+                                {mode: "prelabel" (default) | "inference"}; a start in the other mode restarts it.
+                                A start while it runs in that mode only counts as use (the idle timer starts again).
+  GET  /v1/vlm/status           {state: stopped | starting | ready | failed, detail, engine, model, mode}
   POST /v1/vlm/stop             stop vLLM (the gateway does this after a pre-label run)
   GET  /v1/models, POST /v1/chat/completions    passed to vLLM (503 while it isn't ready)
   GET  /health
@@ -25,8 +27,11 @@ import threading
 import time
 from pathlib import Path
 
+from typing import Literal
+
 import httpx
 from fastapi import Depends, HTTPException, Request, Response
+from pydantic import BaseModel
 
 from . import gpu
 from .common import bearer, make_app
@@ -43,8 +48,13 @@ LOG = Path(os.environ.get("VLLM_LOG", HERE / "vllm.log"))
 # --enforce-eager: no torch.compile / CUDA graph capture, so it is ready in ~70 s instead of ~250 s (it starts per run)
 FLAGS = ["--max-model-len", "8192", "--limit-mm-per-prompt", '{"image": 1}', "--gpu-memory-utilization", "0.88",
          "--max-num-seqs", "4", "--enforce-eager"]
+# inference: RF-DETR stays loaded beside it, so the weights are quantized to fp8 on load (~9 GB instead of ~18 GB) and
+# vLLM takes 70 % of the card; a rule hit sends a clip of frames and reference images: up to 8 images per request
+INFERENCE_FLAGS = ["--max-model-len", "8192", "--limit-mm-per-prompt", '{"image": 8}', "--gpu-memory-utilization", "0.70",
+                   "--quantization", "fp8", "--max-num-seqs", "2", "--enforce-eager"]
+MODES = {"prelabel": FLAGS, "inference": INFERENCE_FLAGS}
 _lock = threading.Lock()
-_s = {"proc": None, "port": None, "used": 0.0, "why": None}  # why: the last stop's reason / exit
+_s = {"proc": None, "port": None, "used": 0.0, "why": None, "mode": None}  # why: the last stop's reason / exit
 
 
 def real_bin():
@@ -56,11 +66,12 @@ def engine():
     return "custom" if os.environ.get("VLLM_CMD") else "vllm" if real_bin() else "fake"
 
 
-def command(port):
+def command(port, mode="prelabel"):
     if os.environ.get("VLLM_CMD"):
         return shlex.split(os.environ["VLLM_CMD"].format(port=port, model=MODEL))
     if real_bin():
-        return [str(real_bin()), "serve", MODEL, "--served-model-name", MODEL, "--host", "127.0.0.1", "--port", str(port), *FLAGS]
+        return [str(real_bin()), "serve", MODEL, "--served-model-name", MODEL, "--host", "127.0.0.1", "--port", str(port),
+                *MODES[mode]]
     return [sys.executable, "-m", "uvicorn", "services.vllm:app", "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"]
 
 
@@ -107,10 +118,13 @@ def state():
 
 
 def view():
-    return {**state(), "engine": engine(), "model": MODEL}
+    return {**state(), "engine": engine(), "model": MODEL, "mode": _s["mode"] if _s["proc"] is not None else None}
 
 
-gpu.holder("vlm", lambda: "vLLM is running for pre-labelling" if running() else None)
+gpu.holder("vlm", lambda: f"vLLM is running for {'inference' if _s['mode'] == 'inference' else 'pre-labelling'}"
+           if running() else None)
+# pre-label mode takes most of the card, so RF-DETR waits; in inference mode it runs beside vLLM
+gpu.holder("vlm-exclusive", lambda: "vLLM is running for pre-labelling" if running() and _s["mode"] != "inference" else None)
 
 
 def stop(why):
@@ -144,25 +158,33 @@ def health():
     return {"status": "ok", "service": "vllm", **view()}
 
 
+class StartIn(BaseModel):
+    mode: Literal["prelabel", "inference"] = "prelabel"
+
+
 @app.post("/v1/vlm/start", dependencies=auth)
-def start():
+def start(body: StartIn | None = None):
+    mode = (body or StartIn()).mode
+    if running() and _s["mode"] != mode:
+        stop(f"restarting for {mode}")
     with _lock:
         if running():
             _s["used"] = time.monotonic()
             return view()
         if reason := gpu.busy("training"):
             raise HTTPException(409, f"{reason}: the VLM can start when it is done")
-        gpu.release()  # the labeller's cached RF-DETR models
+        if mode == "prelabel":
+            gpu.release()  # the labeller's cached RF-DETR models
         port = free_port()
         LOG.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.setdefault("HF_HOME", str(Path.home() / "hf"))  # where deploy.sh VLM=1 downloaded the model (~19 GB)
         with open(LOG, "ab") as log:
-            log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} starting {MODEL} ({engine()})\n".encode())
+            log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} starting {MODEL} ({engine()}, {mode})\n".encode())
             log.flush()
-            p = subprocess.Popen(command(port), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            p = subprocess.Popen(command(port, mode), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                  cwd=str(HERE), env=env, start_new_session=True)
-        _s.update(proc=p, port=port, used=time.monotonic(), why=None)
+        _s.update(proc=p, port=port, used=time.monotonic(), why=None, mode=mode)
     threading.Thread(target=watch_idle, args=(p,), name="vllm-idle", daemon=True).start()
     return view()
 

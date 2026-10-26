@@ -45,7 +45,7 @@ def test_start_chat_stop(vlm):
     r = c.post("/v1/chat/completions", json=body, headers=H)
     assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"]
     assert c.post("/v1/vlm/stop", headers=H).json() == {**c.get("/v1/vlm/status", headers=H).json(), "state": "stopped"}
-    assert "starting Qwen/Qwen3.5-9B (fake)" in Path(mod.LOG).read_text()
+    assert "starting Qwen/Qwen3.5-9B (fake, prelabel)" in Path(mod.LOG).read_text()
 
 
 def test_a_failed_start_shows_the_log(vlm, monkeypatch):
@@ -81,3 +81,27 @@ def test_idle_stop(vlm, monkeypatch):
     until_state(c, "ready")
     st = until_state(c, "stopped", timeout=10)
     assert "without a request" in st["detail"]
+
+
+def test_inference_mode_keeps_rfdetr_beside_vllm(vlm, monkeypatch):
+    mod, c = vlm
+    from services import gpu
+    released = []
+    monkeypatch.setattr(gpu, "_release", [lambda: released.append(1)])
+    st = c.post("/v1/vlm/start", json={"mode": "inference"}, headers=H).json()
+    assert st["mode"] == "inference" and released == []  # the labeller keeps its model
+    until_state(c, "ready")
+    assert gpu.busy("vlm-exclusive") is None and "inference" in gpu.busy("vlm")  # RF-DETR may run, training may not
+    assert "(fake, inference)" in Path(mod.LOG).read_text()
+    assert c.post("/v1/vlm/start", json={"mode": "inference"}, headers=H).json()["state"] == "ready"  # kept alive
+    st = c.post("/v1/vlm/start", headers=H).json()  # pre-label mode: restarted, and the labeller lets go first
+    assert st["mode"] == "prelabel" and released == [1] and "pre-labelling" in gpu.busy("vlm-exclusive")
+
+
+def test_inference_flags_quantize_and_allow_a_clip(vlm, monkeypatch):
+    mod, _ = vlm
+    monkeypatch.setattr(mod, "real_bin", lambda: Path("/opt/vllm"))
+    cmd = mod.command(8000, "inference")
+    assert cmd[cmd.index("--quantization") + 1] == "fp8" and cmd[cmd.index("--limit-mm-per-prompt") + 1] == '{"image": 8}'
+    assert float(cmd[cmd.index("--gpu-memory-utilization") + 1]) <= 0.75
+    assert "--quantization" not in mod.command(8000, "prelabel")

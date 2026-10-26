@@ -27,7 +27,9 @@ class Chat(BaseModel):
 @app.post("/v1/chat/completions")
 def chat(body: Chat):
     text = " ".join(text_of(m.get("content", "")) for m in body.messages)
+    images = sum(1 for m in body.messages if isinstance(m.get("content"), list)
+                 for part in m["content"] if isinstance(part, dict) and part.get("type") == "image_url")
     return {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion", "created": int(time.time()),
             "model": body.model, "choices": [{"index": 0, "finish_reason": "stop",
-                                              "message": {"role": "assistant", "content": vlm_answer(text)}}],
+                                              "message": {"role": "assistant", "content": vlm_answer(text, images)}}],
             "usage": {"prompt_tokens": len(text) // 4, "completion_tokens": 20, "total_tokens": len(text) // 4 + 20}}

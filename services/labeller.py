@@ -180,7 +180,7 @@ gpu.on_release(unload)
 
 @app.post("/v1/predict", dependencies=auth)
 def predict(body: PredictIn):
-    if reason := gpu.busy("vlm"):
+    if reason := gpu.busy("vlm-exclusive"):  # vLLM in inference mode leaves room for RF-DETR
         raise HTTPException(409, f"{reason}: RF-DETR pre-labels when it is done")
     import cv2
     import numpy as np
